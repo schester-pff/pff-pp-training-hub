@@ -1,5 +1,10 @@
 const SHEET_ID = '1kl84ossr5SQmDANbjnAWLb0T8q-9CEVmMJY1QJ-Xov8';
 const UNANSWERED_FORM_URL = 'https://forms.gle/j1qvYifoUWCndaVK7';
+const CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes
+
+// ── Module-level cache — persists across warm invocations ──
+let cachedCoreData = null;
+let cacheTimestamp = 0;
 
 // ── Fetch a single tab from the sheet ──
 async function fetchTab(tabName, apiKey) {
@@ -10,9 +15,15 @@ async function fetchTab(tabName, apiKey) {
   return data.values || [];
 }
 
-// ── Build system prompt from live sheet data ──
-async function buildSystemPrompt(apiKey, weekAccess) {
-  // Core tabs always loaded
+// ── Fetch and cache the 9 core tabs (not game tabs) ──
+async function getCoreData(apiKey) {
+  const now = Date.now();
+  if (cachedCoreData && (now - cacheTimestamp) < CACHE_TTL_MS) {
+    console.log('Cache hit — skipping sheet fetch');
+    return cachedCoreData;
+  }
+
+  console.log('Cache miss — fetching sheet');
   const [rules, faq, pffu, progInfo, discord, redFlags, care, personality, resources] = await Promise.all([
     fetchTab('PP Rules', apiKey),
     fetchTab('FAQ', apiKey),
@@ -25,12 +36,20 @@ async function buildSystemPrompt(apiKey, weekAccess) {
     fetchTab('Resources', apiKey),
   ]);
 
-  // Game tabs — only load based on week access level
-  // Trainees get game content AFTER completing that game
-  // Week 2 = completed Game 1, Week 3 = completed Games 1+2, etc.
+  cachedCoreData = { rules, faq, pffu, progInfo, discord, redFlags, care, personality, resources };
+  cacheTimestamp = now;
+  return cachedCoreData;
+}
+
+// ── Build system prompt ──
+async function buildSystemPrompt(apiKey, weekAccess) {
+  // Core tabs from cache (or fresh fetch if expired)
+  const { rules, faq, pffu, progInfo, discord, redFlags, care, personality, resources } = await getCoreData(apiKey);
+
+  // Game tabs — always fetched fresh, depend on individual trainee access level
   const gameTabs = [];
   const gameNames = ['Game 1', 'Game 2', 'Game 3', 'Game 4'];
-  const gamesAccessible = Math.min(weekAccess - 1, 4); // week 2 = game 1, week 3 = games 1+2, etc.
+  const gamesAccessible = Math.min(weekAccess - 1, 4);
 
   for (let i = 0; i < gamesAccessible; i++) {
     const rows = await fetchTab(gameNames[i], apiKey);
@@ -68,7 +87,7 @@ async function buildSystemPrompt(apiKey, weekAccess) {
   const careText = fmt2col(care);
   const resourcesText = fmtResources(resources);
 
-  // Game-specific content — only what trainee has access to
+  // Game-specific content
   let gameContent = '';
   if (gameTabs.length > 0) {
     gameContent = `\nGAME-SPECIFIC Q&A — available based on games completed:\n`;
