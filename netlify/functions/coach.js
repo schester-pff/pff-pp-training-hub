@@ -1,4 +1,5 @@
 const SHEET_ID = '1kl84ossr5SQmDANbjnAWLb0T8q-9CEVmMJY1QJ-Xov8';
+const UNANSWERED_FORM_URL = 'https://forms.gle/j1qvYifoUWCndaVK7';
 
 // ── Fetch a single tab from the sheet ──
 async function fetchTab(tabName, apiKey) {
@@ -10,51 +11,78 @@ async function fetchTab(tabName, apiKey) {
 }
 
 // ── Build system prompt from live sheet data ──
-async function buildSystemPrompt(apiKey) {
-  const [rules, faq, progInfo, personality, redFlags, care, resources] = await Promise.all([
+async function buildSystemPrompt(apiKey, weekAccess) {
+  // Core tabs always loaded
+  const [rules, faq, pffu, progInfo, discord, redFlags, care, personality, resources] = await Promise.all([
     fetchTab('PP Rules', apiKey),
     fetchTab('FAQ', apiKey),
+    fetchTab('PFFU', apiKey),
     fetchTab('Program Info', apiKey),
-    fetchTab('Personality', apiKey),
+    fetchTab('Discord', apiKey),
     fetchTab('Red Flags', apiKey),
     fetchTab('Care', apiKey),
+    fetchTab('Personality', apiKey),
     fetchTab('Resources', apiKey),
   ]);
 
-  const rulesText = rules.slice(1)
-    .filter(r => r[0] && r[1])
-    .map(r => `SECTION: ${r[0]}\n${r[1]}`)
-    .join('\n\n');
+  // Game tabs — only load based on week access level
+  // Trainees get game content AFTER completing that game
+  // Week 2 = completed Game 1, Week 3 = completed Games 1+2, etc.
+  const gameTabs = [];
+  const gameNames = ['Game 1', 'Game 2', 'Game 3', 'Game 4'];
+  const gamesAccessible = Math.min(weekAccess - 1, 4); // week 2 = game 1, week 3 = games 1+2, etc.
 
-  const faqText = faq.slice(1)
-    .filter(r => r[0] && r[1])
-    .map(r => `Q: ${r[0]}\nA: ${r[1]}`)
-    .join('\n\n');
+  for (let i = 0; i < gamesAccessible; i++) {
+    const rows = await fetchTab(gameNames[i], apiKey);
+    gameTabs.push({ name: gameNames[i], rows });
+  }
 
-  const progText = progInfo.slice(1)
-    .filter(r => r[0] && r[1])
-    .map(r => `${r[0]}: ${r[1]}`)
-    .join('\n\n');
+  // Format helpers
+  const fmt2col = (rows, col1 = 0, col2 = 1) =>
+    rows.slice(1).filter(r => r[col1] && r[col2])
+      .map(r => `${r[col1]}: ${r[col2]}`).join('\n\n');
+
+  const fmt3col = (rows) =>
+    rows.slice(1).filter(r => r[0] && r[2])
+      .map(r => `[${r[0]}] Q: ${r[1]}\nA: ${r[2]}`).join('\n\n');
+
+  const fmtResources = (rows) =>
+    rows.slice(1).filter(r => r[0] && r[1])
+      .map(r => `${r[0]}: ${r[1]}${r[2] ? ' — ' + r[2] : ''}`).join('\n');
 
   const personalityText = personality.slice(1)
     .filter(r => r[0] && r[1])
     .map(r => r[2] ? `${r[0]}: ${r[1]} (Resource: ${r[2]})` : `${r[0]}: ${r[1]}`)
     .join('\n\n');
 
-  const redFlagsText = redFlags.slice(1)
-    .filter(r => r[0] && r[1])
-    .map(r => `${r[0]}: ${r[1]}`)
-    .join('\n\n');
+  const rulesText = rules.slice(1).filter(r => r[0] && r[1])
+    .map(r => `SECTION: ${r[0]}\n${r[1]}`).join('\n\n');
 
-  const careText = care.slice(1)
-    .filter(r => r[0] && r[1])
-    .map(r => `${r[0]}: ${r[1]}`)
-    .join('\n\n');
+  const faqText = faq.slice(1).filter(r => r[0] && r[1])
+    .map(r => `Q: ${r[0]}\nA: ${r[1]}`).join('\n\n');
 
-  const resourcesText = resources.slice(1)
-    .filter(r => r[0] && r[1])
-    .map(r => `${r[0]}: ${r[1]}${r[2] ? ' — ' + r[2] : ''}`)
-    .join('\n');
+  const pffuText = fmt2col(pffu);
+  const progText = fmt2col(progInfo);
+  const discordText = fmt2col(discord);
+  const redFlagsText = fmt2col(redFlags);
+  const careText = fmt2col(care);
+  const resourcesText = fmtResources(resources);
+
+  // Game-specific content — only what trainee has access to
+  let gameContent = '';
+  if (gameTabs.length > 0) {
+    gameContent = `\nGAME-SPECIFIC Q&A — available based on games completed:\n`;
+    gameContent += `IMPORTANT: Only answer game-specific questions about games the trainee has completed. `;
+    gameContent += `This trainee has access to: ${gameTabs.map(g => g.name).join(', ')}.\n`;
+    gameContent += `Do NOT reveal answers about Game ${gamesAccessible + 1} or later games even if asked — those games have not been completed yet.\n\n`;
+    for (const game of gameTabs) {
+      gameContent += `=== ${game.name} ===\n`;
+      gameContent += fmt3col(game.rows);
+      gameContent += '\n\n';
+    }
+  } else {
+    gameContent = `\nGAME-SPECIFIC Q&A: This trainee has not yet completed any training games, so no game-specific play guides are available yet. When they ask about specific plays, let them know this content will unlock after they complete each game.\n`;
+  }
 
   return `You are Coach, the official PP Training Assistant for PFF Enterprise's Player Participation training program, 2026. You are knowledgeable, direct, honest, and have a dry sense of humor. You take the work seriously but not yourself.
 
@@ -80,26 +108,34 @@ ERROR HIERARCHY — apply this whenever discussing performance or feedback:
 
 IMPORTANT: You cannot be perfect at PP from broadcast footage. Nobody is. If a trainee is fixating on their total position error count when their Player Errors and Role Errors are under control, reframe this clearly and honestly.
 
+WHEN YOU CANNOT ANSWER:
+If a question falls outside your knowledge base, say so honestly and direct the trainee to submit it via this form: ${UNANSWERED_FORM_URL}
+Tell them: the team will review it, email them an answer, and add it to the knowledge base so future trainees benefit too.
+Never make up rules. Never guess. If something is genuinely ambiguous, say so and direct them to a trainer or the form.
+
 PP RULES AND CONCEPTS:
 ${rulesText}
 
 FREQUENTLY ASKED QUESTIONS:
 ${faqText}
 
+PFFU — E-LEARNING QUESTIONS:
+${pffuText}
+
 PROGRAMME INFORMATION:
 ${progText}
 
+DISCORD AND NAVIGATION:
+${discordText}
+
 AVAILABLE RESOURCES:
 ${resourcesText}
-
-CARE GUIDANCE:
+${gameContent}
+CARE GUIDANCE — how to handle trainees who are struggling emotionally:
 ${careText}
 
 RED FLAGS — things you must not engage with:
 ${redFlagsText}
-
-WHAT TO DO WHEN YOU DON'T KNOW:
-If a question falls outside your knowledge, say so clearly and honestly. Do not guess or invent answers. Direct the trainee to post in pp-training on Discord, contact their trainer, or submit their question via the unanswered question form. Never make up rules. If something is genuinely ambiguous, say so and direct them to a trainer.
 
 FORMATTING:
 Keep responses focused and readable. Short paragraphs. Only use lists when they genuinely help. American English throughout.`;
@@ -155,9 +191,10 @@ exports.handler = async function(event, context) {
 
     // ── CHAT ──
     if (action === 'chat') {
-      const { messages } = body;
+      const { messages, weekAccess } = body;
+      const accessLevel = parseInt(weekAccess) || 1;
 
-      const system = await buildSystemPrompt(apiKey);
+      const system = await buildSystemPrompt(apiKey, accessLevel);
 
       const response = await fetch('https://api.anthropic.com/v1/messages', {
         method: 'POST',
